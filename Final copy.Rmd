@@ -1,0 +1,317 @@
+---
+title: "Final Project: Analysis Report for Breast Cancer Pantient Clinical Data"
+author: "Zimeng Yu"
+date: "2026-05-01"
+output: pdf_document
+---
+
+**Variables**: 7 categorical variables and 5 continuous variables (notice that height and weight are correlated in corr ~0.5, I made BMI in later analysis). But in the beginning, there're still 5 continuous variables.
+
+**Variable Name	Type	Explanation**:
+
+USI	/	Patient ID
+RNA_BATCH	categorical	RNA batch number
+TREATMENT_ARM	categorical	Drug adjuvent endocrine treatment (yes or no)
+MENOSPAUSAL_STATUS	categorical	Post or Pre menospausal
+AGE	continuous	Age of patient when enrolled
+RISK_GROUP	categorical	Four groups: 1(low),2,3,4(high)
+Nodal Status	continuous	The number of positive nodals
+Tumor Size (cm)	continuous	Tumer size
+WT (kg)	continuous	Weight 
+HT (cm)	continuous	Height 
+Histologic Grade	categorical	Grade of tumor
+Survival Status Indicator	categorical	Patient survive status
+IDFS Event	categorical	Invasive disease-free survival
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## library
+
+```{r packages}
+# PCA analysis
+library(readxl)
+library(corrplot)
+library(PerformanceAnalytics)
+library(FactoMineR)
+library(heplots)
+source("https://raw.githubusercontent.com/jreuning/sds363_code/refs/heads/main/pcaThreshold.r.txt")
+source("https://raw.githubusercontent.com/jreuning/sds363_code/refs/heads/main/ciscoreplot.r.txt")
+
+# manova analysis
+library(MASS)
+library(biotools)
+library(klaR)
+library(car)
+
+# Discriminant analysis
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(ggExtra)
+
+```
+
+```{r}
+cancer_data <- read_excel('clinical_data.xlsx')
+summary(cancer_data)
+
+# process outliers
+cancer_data$`HT (cm)`[cancer_data$`HT (cm)` < 100 | cancer_data$`HT (cm)` > 200] <- NA
+cancer_data$`logTumor Size (cm)` <- log(cancer_data$`Tumor Size (cm)` + 1)
+cancer_data$`logNodal Status (number positive)` <- log(cancer_data$`Nodal Status (number positive)` + 1)
+
+ht_median <- median(cancer_data$`HT (cm)`, na.rm = TRUE)
+cancer_data$`HT (cm)`[is.na(cancer_data$`HT (cm)`)] <- ht_median
+```
+
+## Preprocess for Data
+### do log transformation
+
+```{r}
+# continuous data for PCA
+pca_data <- cancer_data[, c("USI", "AGE", "Nodal Status (number positive)", "Tumor Size (cm)", "WT (kg)", "HT (cm)", "RISK_GROUP", "logTumor Size (cm)", "logNodal Status (number positive)")]
+pca_data <- pca_data[complete.cases(pca_data), ] # keep non-null values
+pca_vars <- pca_data[, c("AGE", "Nodal Status (number positive)", "Tumor Size (cm)", "WT (kg)", "HT (cm)")]
+summary(pca_vars) # we found max height as 460 
+
+logpca_vars <- pca_data[, c("AGE", "logNodal Status (number positive)", "logTumor Size (cm)", "WT (kg)", "HT (cm)")]
+logpca_vars <- logpca_vars[complete.cases(logpca_vars), ]
+summary(logpca_vars)
+```
+
+### correlation plot
+
+```{r}
+cor_mat <- cor(pca_vars)
+round(cor_mat, 2)
+
+corrplot.mixed(cor_mat, lower.col = "black", upper = "ellipse", 
+               tl.col = "black", number.cex = .7, order = "hclust", 
+               tl.pos = "lt", tl.cex = .7)
+```
+
+Since there is a moderate positive correlation (0.5) between HT and WT, including them simultaneously in MANOVA or discriminant analysis will lead to multicollinearity. This will cause interference between feature weights within the model, reducing the power of statistical tests.
+
+### cqplot Multivariate Normality
+
+```{r}
+plot(pca_vars, pch = 19, cex = .7, col = 'red', main = "Matrix plot of Breast Cancer Continuous Data")
+chart.Correlation(pca_vars, histogram = TRUE, pch = 19)
+cqplot(pca_vars, main = "Multivariate Normality - Breast Cancer Data")
+```
+There is a issue for normality: the chi-square plot shows non-normality bias. The Y-axis represents the "comprehensive distance" from the data point to the center of the multivariate space. The point in the top right corner; its actual Mahalanobis distance exceeds 100, while under perfectly normal conditions, the expected distance on the X-axis (chi-square quantile) should only be around 22. This indicates that a few patients in the data have extremely unusual comprehensive clinical indicators (such as abnormally large tumors or numerous lymph node metastases).
+
+### cq plot after log transformation
+
+```{r}
+cor_mat <- cor(logpca_vars)
+round(cor_mat, 2)
+
+corrplot.mixed(cor_mat, lower.col = "black", upper = "ellipse", 
+               tl.col = "black", number.cex = .7, order = "hclust", 
+               tl.pos = "lt", tl.cex = .7)
+
+plot(logpca_vars, pch = 19, cex = .7, col = 'red', main = "Matrix plot of Breast Cancer Continuous Data")
+chart.Correlation(logpca_vars, histogram = TRUE, pch = 19)
+cqplot(logpca_vars, main = "Multivariate Normality - Breast Cancer Logged Data")
+```
+
+### add BMI
+
+```{r MANOVA-BMI}
+cancer_data$BMI <- cancer_data$`WT (kg)` / ((cancer_data$`HT (cm)` / 100)^2)
+pca_data <- cancer_data[, c("USI", "AGE", "Nodal Status (number positive)", "Tumor Size (cm)", "BMI", "WT (kg)", "HT (cm)",  "RISK_GROUP", "logTumor Size (cm)", "logNodal Status (number positive)")]
+summary(pca_data)
+```
+
+## PCA
+
+### if not use BMI
+
+```{r PCA-without-BMI}
+logpca_vars <- pca_data[, c("AGE", "logNodal Status (number positive)", "logTumor Size (cm)", "WT (kg)", "HT (cm)")]
+logpca_vars <- logpca_vars[complete.cases(logpca_vars), ]
+summary(logpca_vars)
+
+pc1 <- prcomp(logpca_vars, scale. = TRUE)
+summary(pc1)
+round(pc1$rotation, 2) # get loadings
+
+screeplot(pc1, type = "lines", col = "red", lwd = 2, pch = 19, cex = 1.2, 
+          main = "Scree Plot of Breast Cancer Data")
+
+pcaThreshold(logpca_vars)
+```
+I find that if not combine HT and WT with BMI which indicates both height and weight information, then recommended PCs can be too many! ie, 4 PCs according to the elbow.
+
+### if use BMI instead of HT and WT
+
+```{r PCA-with-BMI}
+pca_data <- pca_data[complete.cases(pca_data), ]
+logpca_vars <- pca_data[, c("AGE", "logNodal Status (number positive)", "logTumor Size (cm)", "BMI")]
+logpca_vars <- logpca_vars[complete.cases(logpca_vars), ]
+summary(logpca_vars)
+
+pc1 <- prcomp(logpca_vars, scale. = TRUE)
+summary(pc1)
+round(pc1$rotation, 2) # get loadings
+```
+### screeplot
+
+how many PCs leaves
+
+```{r screeplot}
+screeplot(pc1, type = "lines", col = "red", lwd = 2, pch = 19, cex = 1.2, 
+          main = "Scree Plot of Breast Cancer Data")
+
+pcaThreshold(logpca_vars)
+```
+
+### Scoreplot and biplot
+
+```{r}
+pca_data <- pca_data[, c("USI", "AGE", "BMI", "RISK_GROUP", "logTumor Size (cm)", "logNodal Status (number positive)")]
+ciscoreplot(pc1, c(1, 2), pca_data$RISK_GROUP)
+biplot(pc1, choices = c(1, 2), pc.biplot = TRUE, main = "Biplot of PC1 and PC2")
+```
+
+```{r}
+rownames(logpca_vars) <- pca_data$USI
+
+par(cex = .8, col = "blue")
+pc2 <- PCA(logpca_vars, graph = TRUE)
+dev.off()
+
+summary(pc2)
+```
+
+## MANOVA
+
+factors: menospausal status, treatment arm.
+
+### Multivariate normality in EACH group
+
+```{r load data}
+cancer_data$MENOSPAUSAL_STATUS <- as.factor(cancer_data$MENOSPAUSAL_STATUS)
+
+for (i in 1:nlevels(cancer_data$MENOSPAUSAL_STATUS)) {
+  current_level <- levels(cancer_data$MENOSPAUSAL_STATUS)[i]
+  group_data <- cancer_data[cancer_data$MENOSPAUSAL_STATUS == current_level, 
+                            c("AGE", "logNodal Status (number positive)", "logTumor Size (cm)", "BMI")]
+  group_data <- group_data[complete.cases(group_data), ]
+  cqplot(group_data, main = paste("Menopausal Status:", current_level))
+}
+```
+
+### Boxplots of means by group
+
+```{r boxplot}
+# make variable vector
+responsevec <- c("AGE", "logNodal Status (number positive)", "logTumor Size (cm)", "BMI")
+titlevec <- c("Age", "Log Nodal Status", "Log Tumor Size", "BMI")
+
+for (i in 1:4){
+  var_name <- responsevec[i]
+  boxplot(cancer_data[[var_name]] ~ MENOSPAUSAL_STATUS, data = cancer_data, 
+          col = 'lightblue', main = paste(titlevec[i], "By Status"), ylab = var_name)
+
+  means <- tapply(cancer_data[[var_name]], cancer_data$MENOSPAUSAL_STATUS, mean, na.rm = TRUE)
+  points(means, col = "red", pch = 19, cex = 1.2)
+  text(x = c(1, 2), y = means + (max(cancer_data[[var_name]], na.rm=T) * 0.05), labels = round(means, 2))
+}
+```
+
+### one-way MANOVA
+
+```{r}
+cancerManova <- lm(cbind(AGE, `logNodal Status (number positive)`, `logTumor Size (cm)`, BMI) ~ MENOSPAUSAL_STATUS, data = cancer_data)
+anova(cancerManova)
+anova(cancerManova, test = "Wilks")
+```
+```{r}
+# which variable makes difference if significant
+summary(Anova(cancerManova), univariate = TRUE, p.adjust.method = "holm")
+
+cqplot(cancerManova$residuals, main = "Residuals from Breast Cancer MANOVA")
+```
+## Discriminant Analysis
+
+In the previous step, MANOVA revealed that AGE and BMI are significantly influenced by menopausal status, while PCA showed that logNodal and logTumor determine tumor severity. Therefore, we chose to predict RISK_GROUP (risk level), which is the most challenging and specialized approach. 
+
+This is because risk level is typically a clinical determination that integrates multiple indicators. Using discriminant analysis to verify how these indicators contribute to risk classification aligns perfectly with the principles of multivariate statistics.
+
+```{r}
+lda_df <- cancer_data[, c("RISK_GROUP", "AGE", "logNodal Status (number positive)", 
+                          "logTumor Size (cm)", "BMI")]
+colnames(lda_df) <- c("RISK_GROUP", "AGE", "logNodal", "logTumor", "BMI")
+lda_df <- lda_df[complete.cases(lda_df), ]
+```
+
+
+### linear discriminant analysis.
+
+```{r load factors}
+lda_df$RISK_GROUP <- as.factor(lda_df$RISK_GROUP)
+
+# run linear discriminant analysis.
+cancer_lda <- lda(RISK_GROUP ~ AGE + logNodal + logTumor + BMI, data = lda_df)
+cancer_lda
+```
+
+### predict
+
+```{r}
+lda_pred <- predict(cancer_lda)
+
+# confusion matrix
+conf_matrix <- table(Predicted = lda_pred$class, Actual = lda_df$RISK_GROUP)
+print(conf_matrix)
+
+# calculate accuracy
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+print(paste("Overall Accuracy:", round(accuracy, 4)))
+```
+### Discriminant Scores
+
+`lda_pred$x` contains all the LD scores. Since you have 4 groups, this will produce LD1, LD2, and LD3. We usually choose LD1, which has the strongest explanatory power.
+
+```{r}
+scores <- lda_pred$x[, 1]
+boxplot(scores ~ lda_df$RISK_GROUP, 
+        lwd = 2, 
+        col = c("green", "yellow", "orange", "red"), # from low risk(green) to high risk (red)
+        horizontal = TRUE, 
+        main = "Discriminant Scores (LD1) by Risk Group",
+        xlab = "Linear Discriminant 1 Score")
+```
+
+### Partition Plot
+
+Since we have four predictor variables, the partitioning plot will show the classification boundaries in pairs. For the sake of brevity, we'll select the two most critical variables (such as logTumor and logNodal) to observe how the risks are segmented.
+
+```{r}
+partimat(RISK_GROUP ~ logNodal + logTumor, 
+         data = lda_df, 
+         method = "lda",
+         main = "LDA Partitioning: Nodal vs Tumor Size")
+
+partimat(RISK_GROUP ~ logNodal + logTumor, 
+         data = lda_df, 
+         method = "qda",
+         main = "QDA Partitioning: Nodal vs Tumor Size")
+```
+
+
+
+
+
+
+
+
+
+
+
+
