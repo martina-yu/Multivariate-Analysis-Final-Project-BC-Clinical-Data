@@ -1,6 +1,6 @@
 ---
 title: "Final Project: Analysis Report for Breast Cancer Pantient Clinical Data"
-author: "Zimeng Yu"
+author: ""
 date: "2026-05-01"
 output: pdf_document
 ---
